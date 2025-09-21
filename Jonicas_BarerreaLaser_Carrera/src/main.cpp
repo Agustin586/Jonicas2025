@@ -1,50 +1,46 @@
 #include <Arduino.h>
+#include "RaceEvent.h"
+#include "RaceMef.h"
 
-// Declaración de la tarea
-void TaskBlinkLED(void *pvParameters);
+QueueHandle_t gRaceQ = nullptr;
+static TaskHandle_t hRaceTask = nullptr;
 
-// put function declarations here:
-int myFunction(int, int);
+// --------- Hooks de ejemplo: reemplazá por tu lógica real ----------
+void userResetData()                  { Serial.println("[RESET] userResetData"); }
 
+void webStartRace()                   { Serial.println("[SEMAPHORE] webStartRace"); }
+void webInitRace()                    { Serial.println("[RUNNING] webInitRace"); }
+void tempSemStart()                   { Serial.println("[SEMAPHORE] tempSemStart"); }
+void tempRunStart()                   { Serial.println("[RUNNING] tempRunStart"); }
+void tempRunStop()                    { Serial.println("[STOP] tempRunStop"); }
+void tempStop()                       { Serial.println("[FINISH] tempStop"); }
+void webFinishRace(uint32_t info)     { Serial.printf("[FINISH] webFinishRace info=%lu\n", (unsigned long)info); }
+uint32_t userGetDataInfo()            { return 42; }
+void webRaceStop()                    { Serial.println("[STOP] webRaceStop"); }
+void webResetRace()                   { Serial.println("[FINISH] webResetRace"); }
+void contVueltaInc()                  { Serial.println("[FINISH] contVueltaInc"); }
+
+// ---------------------------------------------------------------
 void setup() {
-  Serial.begin(115200); // Inicializa el puerto serie
+  Serial.begin(115200);
+  delay(200);
+  Serial.println("\nMEF Carrera (ESP32 + FreeRTOS)");
 
-  // Crear la tarea de parpadeo del LED
-  xTaskCreate(
-    TaskBlinkLED,      // Función de la tarea
-    "BlinkLED",        // Nombre de la tarea
-    2048,              // Tamaño del stack (más grande por seguridad)
-    NULL,              // Parámetro para la tarea
-    1,                 // Prioridad
-    NULL               // Handle de la tarea
-  );
+  gRaceQ = xQueueCreate(16, sizeof(RaceEvent));
+  xTaskCreatePinnedToCore(RaceTask, "RaceTask", 4096, (void*)gRaceQ, 2, &hRaceTask, APP_CPU_NUM);
 
-  // put your setup code here, to run once:
-  int result = myFunction(2, 3);
-  Serial.print("Resultado de myFunction: ");
-  Serial.println(result);
+  // --- Escenario de prueba: start -> semáforo -> running -> finish ---
+  // Lanzá eventos desde tu UI real; esto es solo demo:
+  // startRace();
+
+  // // Simular un finish a los ~5 segundos
+  // xTaskCreatePinnedToCore([](void*) {
+  //   vTaskDelay(pdMS_TO_TICKS(5000));
+  //   finishRace();
+  //   vTaskDelete(nullptr);
+  // }, "DemoFinish", 2048, nullptr, 1, nullptr, APP_CPU_NUM);
 }
 
 void loop() {
-  // No es necesario usar loop() con FreeRTOS, las tareas se encargan
-}
-
-// Definición de la tarea
-void TaskBlinkLED(void *pvParameters) {
-  (void) pvParameters;
-  pinMode(LED_BUILTIN, OUTPUT);
-
-  for (;;) {
-    digitalWrite(LED_BUILTIN, HIGH);
-    Serial.println("LED ON");
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    digitalWrite(LED_BUILTIN, LOW);
-    Serial.println("LED OFF");
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-  }
-}
-
-// put function definitions here:
-int myFunction(int x, int y) {
-  return x + y;
+  // nada: la MEF corre en su tarea
 }

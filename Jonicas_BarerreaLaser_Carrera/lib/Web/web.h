@@ -30,5 +30,9 @@ void webRaceInit(void);
  * @return True: resetea la mef / False: sigue en finish
  */
 bool webRaceReset(void);
+/**
+ * @brief Datos que se mandan cuando se llega a finish de la carrera
+ */
+void webRaceFinish(void);
 
 #endif // WEB_H

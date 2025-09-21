@@ -113,6 +113,7 @@ static void onEntry(RaceState st)
         Serial.println("[FINISH] onEntry");
 
         // Acciones...
+        webRaceFinish();
         xTimerStop(xWebTimer, portMAX_DELAY);
 
         break;

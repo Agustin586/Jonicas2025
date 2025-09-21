@@ -59,3 +59,9 @@ bool webRaceReset(void)
     // Acciones...
     return reset;
 }
+
+void webRaceFinish(void)
+{
+    // Debug...
+    Serial.println("[FINISH] webRaceFinish");
+}

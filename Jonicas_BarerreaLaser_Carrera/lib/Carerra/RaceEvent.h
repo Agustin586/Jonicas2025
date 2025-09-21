@@ -35,20 +35,4 @@ inline void startRace()    { postRace(RaceEventType::EV_RACE_START); }
 inline void finishRace()   { postRace(RaceEventType::EV_RACE_FINISH_REQ); }
 inline void resetRace()    { postRace(RaceEventType::EV_RACE_RESET_REQ); }
 
-// -------- Hooks (stubs): implementalos en tu app --------
-void userResetData();
-
-void webStartRace();                 
-void webInitRace();                   
-void tempSemStart();
-void tempRunStart();
-void tempRunStop();
-void tempStop();
-void webFinishRace(uint32_t userDataInfo);  
-uint32_t userGetDataInfo();
-
-void webRaceStop();
-void webResetRace();
-void contVueltaInc();
-
 #endif // RACE_EVENTS_H

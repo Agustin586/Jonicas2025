@@ -5,6 +5,7 @@
 #include "RaceEvent.h"
 #include "freertos/timers.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 enum class RaceState : uint8_t {
   EST_RACE_RESET,
@@ -15,5 +16,7 @@ enum class RaceState : uint8_t {
 };
 
 void RaceTask(void* pv);
+// Test
+void testTask(void *pv);
 
 #endif // CARRERA_H

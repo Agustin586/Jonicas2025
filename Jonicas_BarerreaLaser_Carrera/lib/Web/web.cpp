@@ -1,6 +1,21 @@
 #include "web.h"
 #include "config.h"
 
+void webTask(void *pv)
+{
+    // Inicializaciones...
+
+    for(;;)
+    {
+        // Debug...
+        Serial.println("[WEB] webTask running");
+
+        // Acciones...
+
+        vTaskDelay(pdMS_TO_TICKS(1000));  // Le pongo un delay para que no sobrecargue las tareas, se cambiar.
+    }
+}
+
 void webReset(void)
 {
     // Debug...
@@ -11,19 +26,36 @@ void webReset(void)
 
 bool webRaceStart(void)
 {
+    bool val = false;
     // Debug...
-    Serial.println("[IDLE] webRaceStart");
+    // Serial.println("[IDLE] webRaceStart");
 
     // Acciones...
-    // Para probarlo vamos a realizar un test que se encargue de mandar un true
+    return val;
 }
 
 void webTempUpdate(uint32_t time)
 {
     // Debug...
-    Serial.println("[RUNNING] webUpdateTemp:");
-    Serial.print(time / 1000.0);
-    Serial.println(" s");
+    Serial.printf("[RUNNING] webUpdateTemp: %.2f s\n", time / 1000.0);
 
     // Acciones...
+}
+
+void webRaceInit(void)
+{
+    // Debug...
+    Serial.println("[RUNNING] webRaceInit");
+
+    // Acciones...
+}
+
+bool webRaceReset(void)
+{
+    bool reset = false;
+    // Debug...
+    // Serial.println("[FINISH] webRaceReset");
+
+    // Acciones...
+    return reset;
 }

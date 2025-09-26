@@ -1,27 +1,31 @@
 #include "config.h"
 #include "RaceMef.h"
 #include "web.h"
+#include "RaceEvent.h"
+
+#include <Arduino.h>
 
 // ===============================================
 // DEFINES
 // ===============================================
-#define SEMAPHORE_RED_LIGHT     16
-#define SEMAPHORE_YELLOW_LIGHT  17
-#define SEMAPHORE_GREEN_LIGHT   18
-#define SEMAPHORE_PERIODE_1S 1000
-#define SEMAPHORE_PERIODE_2S 2000
-#define SEMAPHORE_PERIODE_3S 3000
-#define BARRIER_PIN 23
+#define SEMAPHORE_RED_LIGHT     2
+#define SEMAPHORE_YELLOW_LIGHT  41
+#define SEMAPHORE_GREEN_LIGHT   42
+#define SEMAPHORE_PERIODE_1S   1000u
+#define SEMAPHORE_PERIODE_2S   2000u
+#define SEMAPHORE_PERIODE_3S   3000u
+#define BARRIER_PIN             4
 
 // ===============================================
-// DEFINICIONES DE VARIABLES
+// VARIABLES DE MEF
 // ===============================================
-static RaceState sState = RaceState::EST_RACE_RESET; // Estados de la MEF
-static uint32_t sSemStep = 0;                        // Contador de secuencia de semáforo
-static const uint32_t kSemSteps = 3;                 // Cantidad de pasos del semáforo (ajustable)
-static uint32_t raceStartTick = 0;                   // Cuenta el inicio de la carrera
-static uint32_t raceEndTick = 0;                     // Cuenta el fin de la carrera
+static RaceState sState = RaceState::EST_RACE_RESET;
+static uint32_t sSemStep = 0;
+static const uint32_t kSemSteps = 2; // 0=rojo, 1=amarillo, 2=verde
+static uint32_t raceStartTick = 0;
+static uint32_t raceEndTick = 0;
 static bool endSemaphoreSeq = false;
+static uint32_t lastBarrierTick = 0; // Para debounce 10s
 
 TimerHandle_t xSemaphoreTimer = nullptr;
 TimerHandle_t xWebTimer = nullptr;
@@ -29,10 +33,11 @@ TimerHandle_t xBlinkTimer = nullptr;
 QueueHandle_t raceQ = nullptr;
 
 SemaphoreHandle_t xBarrierSemaphore = nullptr;
+
 // ===============================================
-// DECLARACIONES DE FUNCIONES
+// DECLARACIONES LOCALES
 // ===============================================
-static void gotoState(RaceState ns) { sState = ns; } // Cambia el estado de la MEF
+static void gotoState(RaceState ns) { sState = ns; }
 static void timerInit(void);
 static void timerReset(void);
 static void semaphoreInit(void);
@@ -46,76 +51,55 @@ static void blinkTimerCallback(TimerHandle_t xTimer);
 static void blinkInit(void);
 static void barrierInit(void);
 void IRAM_ATTR barrierISR();
-
-// ===============================================
-// DECLARACIONES DE FUNCIONES PARA TEST
-// ===============================================
-static void testSimularCruceMeta(void);
 static void testSemaphoreSequence(void);
-static void testTempInit(void);
-
-// ==============================================
-// VARIABLES PARA TEST
-// ==============================================
-TimerHandle_t xtestInitRace = nullptr;
-TimerHandle_t xtestFinishRace = nullptr;
-TimerHandle_t xtestSemaphore = nullptr;
 
 // ===============================================
-// DEFINICIONES DE FUNCIONES
+// IMPLEMENTACIÓN
 // ===============================================
 static void onEntry(RaceState st)
 {
     switch (st)
     {
     case RaceState::EST_RACE_RESET:
-        // Debug...
         Serial.println("[RESET] onEntry");
-
-        // Acciones...
+        if (xSemaphoreTimer) xTimerStop(xSemaphoreTimer, portMAX_DELAY);
+        if (xWebTimer) xTimerStop(xWebTimer, portMAX_DELAY);
         semaphoreReset();
         timerReset();
         raceReset();
-
-        // Transiciones...
-        gotoState(RaceState::EST_RACE_IDLE);    // Transicion de tipo: 1 / acciones() 
-
+        webReset();
+        gotoState(RaceState::EST_RACE_IDLE);
+        onEntry(RaceState::EST_RACE_IDLE);
         break;
 
     case RaceState::EST_RACE_IDLE:
-        // Debug...
         Serial.println("[IDLE] onEntry");
-
+        webUpdateRaceState("WAITING");
         break;
 
     case RaceState::EST_RACE_SEMAPHORE:
-        // Debug...
         Serial.println("[SEMAPHORE] onEntry");
-
-        // Acciones...
-        semaphoreSequence(sSemStep);     // Inicia la secuencia de semáforo
-        xTimerStart(xSemaphoreTimer, 0); // webUpdateTemp()
-
+        webUpdateRaceState("SEMAPHORE");
+        sSemStep = 0;
+        endSemaphoreSeq = false;
+        semaphoreSequence(sSemStep);
+        if (xSemaphoreTimer) {
+            xTimerChangePeriod(xSemaphoreTimer, pdMS_TO_TICKS(SEMAPHORE_PERIODE_1S), 0);
+            xTimerStart(xSemaphoreTimer, 0);
+        }
         break;
 
     case RaceState::EST_RACE_RUNNING:
-        // Debug...
         Serial.println("[RUNNING] onEntry");
-
-        // Acciones...
         raceRunning();
-        xTimerStart(xWebTimer, 0);
-
+        if (xWebTimer) xTimerStart(xWebTimer, 0);
+        webRaceInit();
         break;
 
     case RaceState::EST_RACE_FINISH:
-        // Debug...
         Serial.println("[FINISH] onEntry");
-
-        // Acciones...
         webRaceFinish();
-        xTimerStop(xWebTimer, portMAX_DELAY);
-
+        if (xWebTimer) xTimerStop(xWebTimer, portMAX_DELAY);
         break;
     }
 }
@@ -124,280 +108,226 @@ static void handleEvent(const RaceEvent &ev)
 {
     switch (sState)
     {
-    // ESTADO DE ESPERRA
     case RaceState::EST_RACE_IDLE:
-        if (ev.type == RaceEventType::EV_RACE_START)
-        {
-            gotoState(RaceState::EST_RACE_SEMAPHORE); // Transición a SEMÁFORO
-            onEntry(RaceState::EST_RACE_SEMAPHORE);   // onEntry de SEMÁFORO
-        }
-
-        break;
-
-    // ESTADO DE SEMAFORO
-    case RaceState::EST_RACE_SEMAPHORE:
-        if (ev.type == RaceEventType::EV_RACE_SEMAPHORE_REQ)
-        {
-            gotoState(RaceState::EST_RACE_RUNNING);
-            onEntry(RaceState::EST_RACE_RUNNING);
-        }
-
-        break;
-
-    // ESTADO DE RUNNING
-    case RaceState::EST_RACE_RUNNING:
-        if (ev.type == RaceEventType::EV_RACE_FINISH_REQ)
-        {
-            gotoState(RaceState::EST_RACE_FINISH);
-            onEntry(RaceState::EST_RACE_FINISH);
-        }
-        
-        break;
-
-    // ESTADO DE FINISH
-    case RaceState::EST_RACE_FINISH:
-        if (ev.type == RaceEventType::EV_RACE_RESET_REQ)
-        {
+        if (ev.type == RaceEventType::EV_RACE_START) {
+            gotoState(RaceState::EST_RACE_SEMAPHORE);
+            onEntry(RaceState::EST_RACE_SEMAPHORE);
+        } else if (ev.type == RaceEventType::EV_RACE_RESET_REQ) {
             gotoState(RaceState::EST_RACE_RESET);
             onEntry(RaceState::EST_RACE_RESET);
         }
-
         break;
 
-    // ESTADO DE RESET
+    case RaceState::EST_RACE_SEMAPHORE:
+        if (ev.type == RaceEventType::EV_RACE_SEMAPHORE_REQ) {
+            gotoState(RaceState::EST_RACE_RUNNING);
+            onEntry(RaceState::EST_RACE_RUNNING);
+        } else if (ev.type == RaceEventType::EV_RACE_RESET_REQ) {
+            Serial.println("[SEMAPHORE] Reset solicitado");
+            gotoState(RaceState::EST_RACE_RESET);
+            onEntry(RaceState::EST_RACE_RESET);
+        }
+        break;
+
+    case RaceState::EST_RACE_RUNNING:
+        if (ev.type == RaceEventType::EV_RACE_FINISH_REQ) {
+            raceEndTick = xTaskGetTickCount();
+            uint32_t elapsedTicks = (raceEndTick - raceStartTick);
+            uint32_t elapsedMs = elapsedTicks * portTICK_PERIOD_MS;
+            webTempUpdate(elapsedMs);
+            gotoState(RaceState::EST_RACE_FINISH);
+            onEntry(RaceState::EST_RACE_FINISH);
+        } else if (ev.type == RaceEventType::EV_RACE_RESET_REQ) {
+            Serial.println("[RUNNING] Reset solicitado");
+            gotoState(RaceState::EST_RACE_RESET);
+            onEntry(RaceState::EST_RACE_RESET);
+        }
+        break;
+
+    case RaceState::EST_RACE_FINISH:
+        if (ev.type == RaceEventType::EV_RACE_RESET_REQ) {
+            gotoState(RaceState::EST_RACE_RESET);
+            onEntry(RaceState::EST_RACE_RESET);
+        }
+        break;
+
     case RaceState::EST_RACE_RESET:
-        // entry ya nos llevó a IDLE
+        if (ev.type == RaceEventType::EV_RACE_RESET_REQ)
+            Serial.println("[RESET] Reset ya en progreso");
         break;
     }
 }
 
 void RaceTask(void *pv)
 {
-    Serial.println("[RACE_TASK] Tarea creada correctamente");
+    Serial.println("[RACE_TASK] Tarea creada");
 
-    // --- INICIALIZACIONES ---
-    // Temporizadores
     timerInit();
-    // Blink
-    blinkInit();    // Orden importante --> Inicia el timer de blink
-    // Semáforo
+    blinkInit();
     semaphoreInit();
-    // Barrera
     barrierInit();
-    // Test
-    // testTempInit();
-    
+
     raceQ = (QueueHandle_t)pv;
     sState = RaceState::EST_RACE_RESET;
     onEntry(RaceState::EST_RACE_RESET);
 
-    const TickType_t period = pdMS_TO_TICKS(100); // 10 Hz --> Tiempo maximo de espera
     RaceEvent ev;
-
     for (;;)
     {
-        // --- EVENTOS RECIBIDOS DESDE LA COLA DE DATOS ---
-        if (xQueueReceive(raceQ, &ev, period) == pdTRUE)
+        if (xQueueReceive(raceQ, &ev, pdMS_TO_TICKS(100)) == pdTRUE)
             handleEvent(ev);
 
-        // --- DETECTA INICIO DESDE VIA WEB ---
-        if (webRaceStart() && sState == RaceState::EST_RACE_IDLE)
-        {
-            // Debug...
-            Serial.println("[IDLE] Inicio de carrera desde web");
-
-            // Configura el mensaje a enviar
-            RaceEvent evToSend = {
-                .type = RaceEventType::EV_RACE_START,
-                .arg = 0
-            };
-            // Envia evento de inicio hacia la cola de datos
+        if (webRaceStart() && sState == RaceState::EST_RACE_IDLE) {
+            RaceEvent evToSend = { .type = RaceEventType::EV_RACE_START, .arg = 0 };
             xQueueSendToBack(raceQ, &evToSend, portMAX_DELAY);
         }
 
-        if (xSemaphoreTake(xBarrierSemaphore, 0) == pdTRUE)
-        {
-            // Debug...
-            Serial.println("[BARRIER] Se activo la barrera");
-
-            // Acciones...
-            if (sState == RaceState::EST_RACE_RUNNING)
-            {
-                RaceEvent evToSend = {
-                    .type = RaceEventType::EV_RACE_FINISH_REQ,
-                    .arg = 0
-                };
-                xQueueSendToBack(raceQ, &evToSend, portMAX_DELAY);
+        if (xSemaphoreTake(xBarrierSemaphore, 0) == pdTRUE) {
+            uint32_t now = xTaskGetTickCount();
+            uint32_t elapsedMs = (now - lastBarrierTick) * portTICK_PERIOD_MS;
+            if (elapsedMs < 10000) {
+                Serial.println("[BARRIER] Ignorado por debounce");
+            } else {
+                lastBarrierTick = now;
+                if (sState == RaceState::EST_RACE_SEMAPHORE && !endSemaphoreSeq) {
+                    Serial.println("[BARRIER] Largada falsa!");
+                    webFalseStart();
+                    RaceEvent evToSend = { .type = RaceEventType::EV_RACE_RESET_REQ, .arg = 0 };
+                    xQueueSendToBack(raceQ, &evToSend, portMAX_DELAY);
+                }
+                else if (sState == RaceState::EST_RACE_SEMAPHORE && endSemaphoreSeq) {
+                    RaceEvent evToSend = { .type = RaceEventType::EV_RACE_SEMAPHORE_REQ, .arg = 0 };
+                    xQueueSendToBack(raceQ, &evToSend, portMAX_DELAY);
+                }
+                else if (sState == RaceState::EST_RACE_RUNNING) {
+                    RaceEvent evToSend = { .type = RaceEventType::EV_RACE_FINISH_REQ, .arg = 0 };
+                    xQueueSendToBack(raceQ, &evToSend, portMAX_DELAY);
+                }
             }
         }
 
-        // --- DETECTA REINICIO DE CARRERA VIA WEB ---
-        if (webRaceReset() && sState == RaceState::EST_RACE_FINISH)
-        {
-            // Debug...
-            Serial.println("[FINISH] Fin de carrera");
-
-            // Configura el mensaje a enviar
-            RaceEvent evToSend = {
-                .type = RaceEventType::EV_RACE_RESET_REQ,
-                .arg = 0
-            };
-            // Envia el mensaje a la cola de datos
+        if (webRaceReset()) {
+            RaceEvent evToSend = { .type = RaceEventType::EV_RACE_RESET_REQ, .arg = 0 };
             xQueueSendToBack(raceQ, &evToSend, portMAX_DELAY);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10)); // Pequeña espera para evitar bloqueo total de la tarea
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
+
+// ------------------ TIMERS ---------------------
 static void timerInit(void)
 {
-    xSemaphoreTimer = xTimerCreate(
-        "SemTimer",
-        pdMS_TO_TICKS(SEMAPHORE_PERIODE_1S),
-        pdFALSE,
-        NULL,
-        semaphoreTimerCallback);
-
-    xWebTimer = xTimerCreate(
-        "WebTimer",
-        pdMS_TO_TICKS(WEB_TIMER_UPDATE_PERIOD),
-        pdTRUE,
-        NULL,
-        webTimerCallback);
-
-    xBlinkTimer = xTimerCreate(
-        "BlinkTimer",
-        pdMS_TO_TICKS(500),
-        pdTRUE,
-        NULL,
-        blinkTimerCallback
-    );
+    xSemaphoreTimer = xTimerCreate("SemTimer", pdMS_TO_TICKS(SEMAPHORE_PERIODE_1S), pdFALSE, NULL, semaphoreTimerCallback);
+    xWebTimer = xTimerCreate("WebTimer", pdMS_TO_TICKS(WEB_TIMER_UPDATE_PERIOD), pdTRUE, NULL, webTimerCallback);
+    xBlinkTimer = xTimerCreate("BlinkTimer", pdMS_TO_TICKS(500), pdTRUE, NULL, blinkTimerCallback);
 }
 
 static void timerReset(void)
 {
-    xTimerStop(xSemaphoreTimer, portMAX_DELAY); // Detiene el timer del semáforo
-    xTimerStop(xWebTimer, portMAX_DELAY);       // Detiene el timer de actualización web
+    if (xSemaphoreTimer) xTimerStop(xSemaphoreTimer, portMAX_DELAY);
+    if (xWebTimer) xTimerStop(xWebTimer, portMAX_DELAY);
 }
 
+// ------------------ SEMÁFORO --------------------
 static void semaphoreInit(void)
 {
     sSemStep = 0;
     endSemaphoreSeq = false;
 
-    // Configura todas las luces
     pinMode(SEMAPHORE_RED_LIGHT, OUTPUT);
     pinMode(SEMAPHORE_YELLOW_LIGHT, OUTPUT);
     pinMode(SEMAPHORE_GREEN_LIGHT, OUTPUT);
 
-    // Apagar todas las luces
     digitalWrite(SEMAPHORE_RED_LIGHT, LOW);
     digitalWrite(SEMAPHORE_YELLOW_LIGHT, LOW);
     digitalWrite(SEMAPHORE_GREEN_LIGHT, LOW);
-
-    // Test
-    // testSemaphoreSequence();
-}
-
-static void semaphoreTimerCallback(TimerHandle_t xTimer)
-{
-    // --- Avanzar un paso en la secuencia de semáforo ---
-    sSemStep++;
-
-    // --- Realiza la secuencia del semaforo con leds ---
-    semaphoreSequence(sSemStep);
-
-    // --- Verificar si se completó la secuencia ---
-    if (sSemStep >= kSemSteps)
-        endSemaphoreSeq = true;
 }
 
 static void semaphoreSequence(uint32_t n)
 {
-    // Debug...
     Serial.printf("[SEMAPHORE] step=%lu\n", (unsigned long)n);
+    webSemaphoreState(n);
 
-    // Acciones...
     switch (n)
     {
     case 0:
-        sSemStep = 0;
-        endSemaphoreSeq = false;
-
-        // Encender luz roja
+        // Rojo ON
         digitalWrite(SEMAPHORE_RED_LIGHT, HIGH);
         digitalWrite(SEMAPHORE_YELLOW_LIGHT, LOW);
         digitalWrite(SEMAPHORE_GREEN_LIGHT, LOW);
 
-        // Test
+        // Preparar siguiente periodo (amarillo) en 1s
+        if (xSemaphoreTimer) {
+            xTimerChangePeriod(xSemaphoreTimer, pdMS_TO_TICKS(SEMAPHORE_PERIODE_1S), 0);
+            xTimerStart(xSemaphoreTimer, 0);
+        }
         testSemaphoreSequence();
-
         break;
+
     case 1:
-        // Encender luz amarilla
+        // Rojo + Amarillo ON
         digitalWrite(SEMAPHORE_RED_LIGHT, HIGH);
         digitalWrite(SEMAPHORE_YELLOW_LIGHT, HIGH);
         digitalWrite(SEMAPHORE_GREEN_LIGHT, LOW);
 
-        // Timer para segunda secuencia
-        xTimerChangePeriod(xSemaphoreTimer, pdMS_TO_TICKS(SEMAPHORE_PERIODE_3S), 0);
-        xTimerStart(xSemaphoreTimer, 0);
-
-        // Test
+        // Preparar siguiente periodo (verde) en 3s
+        if (xSemaphoreTimer) {
+            xTimerChangePeriod(xSemaphoreTimer, pdMS_TO_TICKS(SEMAPHORE_PERIODE_3S), 0);
+            xTimerStart(xSemaphoreTimer, 0);
+        }
         testSemaphoreSequence();
-
         break;
+
     case 2:
-        // Encender luz verde, apagar roja y amarilla
+        // Verde ON -> mantener hasta primer cruce
         digitalWrite(SEMAPHORE_RED_LIGHT, LOW);
         digitalWrite(SEMAPHORE_YELLOW_LIGHT, LOW);
         digitalWrite(SEMAPHORE_GREEN_LIGHT, HIGH);
 
-        // Timer para tercera secuencia
-        xTimerChangePeriod(xSemaphoreTimer, pdMS_TO_TICKS(SEMAPHORE_PERIODE_2S), 0);
-        xTimerStart(xSemaphoreTimer, 0);
+        // Marcamos que la secuencia terminó y ahora esperamos cruce
+        endSemaphoreSeq = true;
 
-        // Transición a RUNNING se maneja en handleEvent al completar secuencia
-        RaceEvent evToSend;
-        evToSend.type = RaceEventType::EV_RACE_SEMAPHORE_REQ;
-        xQueueSendToBack(raceQ, &evToSend, portMAX_DELAY);
+        // No rearmamos más timers del semáforo; queda a la espera de cruce
+        if (xSemaphoreTimer) xTimerStop(xSemaphoreTimer, portMAX_DELAY);
 
-        // Test
         testSemaphoreSequence();
-
         break;
-    case 3:
-        // Debug...
 
-        // Acciones...
+    default:
+        // Aseguramos estado seguro (apagado)
         digitalWrite(SEMAPHORE_RED_LIGHT, LOW);
         digitalWrite(SEMAPHORE_YELLOW_LIGHT, LOW);
         digitalWrite(SEMAPHORE_GREEN_LIGHT, LOW);
-
-        xTimerStop(xSemaphoreTimer, portMAX_DELAY);
-
-        // Test
-        testSemaphoreSequence();
-
-        break;
-    default:
-        // No hacer nada o manejar error
+        if (xSemaphoreTimer) xTimerStop(xSemaphoreTimer, portMAX_DELAY);
         break;
     }
+}
+
+static void semaphoreTimerCallback(TimerHandle_t xTimer)
+{
+    // Avanzar paso
+    sSemStep++;
+
+    // Si se pasa del último paso, no avanzar más
+    if (sSemStep > kSemSteps) {
+        sSemStep = kSemSteps;
+    }
+
+    semaphoreSequence(sSemStep);
 }
 
 static void semaphoreReset(void)
 {
     sSemStep = 0;
     endSemaphoreSeq = false;
-
-    // Apagar todas las luces
     digitalWrite(SEMAPHORE_RED_LIGHT, LOW);
     digitalWrite(SEMAPHORE_YELLOW_LIGHT, LOW);
     digitalWrite(SEMAPHORE_GREEN_LIGHT, LOW);
 }
 
+// ------------------ RACE -----------------------
 static void raceReset(void)
 {
     raceStartTick = 0;
@@ -406,38 +336,40 @@ static void raceReset(void)
 
 static void raceRunning(void)
 {
-    // --- TOMA EL VALOR INICIAL DEL TICK ---
+    // Guardar tick de inicio
     raceStartTick = xTaskGetTickCount();
 }
 
+// ------------------ WEB TIMER -------------------
 static void webTimerCallback(TimerHandle_t xTimer)
 {
+    if (raceStartTick == 0) return; // protección
+
     uint32_t raceIntTick = xTaskGetTickCount();
     uint32_t elapsedTicks = raceIntTick - raceStartTick;
     uint32_t elapsedMs = elapsedTicks * portTICK_PERIOD_MS;
-    
+
     webTempUpdate(elapsedMs);
 }
 
+// ------------------ BLINK ----------------------
 static void blinkTimerCallback(TimerHandle_t xTimer)
 {
-    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+    // Toggle internal LED si querés
+    // digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
 }
 
 static void blinkInit(void)
 {
-    // Debug...
-    Serial.println("[BLINK] blinkInit");
-
-    // Acciones...
     pinMode(LED_BUILTIN, OUTPUT);
-    xTimerStart(xBlinkTimer, 0);
+    if (xBlinkTimer) xTimerStart(xBlinkTimer, 0);
 }
 
+// ------------------ BARRERA --------------------
 static void barrierInit(void)
 {
     xBarrierSemaphore = xSemaphoreCreateBinary();
-    
+
     pinMode(BARRIER_PIN, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(BARRIER_PIN), barrierISR, FALLING);
 }
@@ -445,130 +377,22 @@ static void barrierInit(void)
 void IRAM_ATTR barrierISR()
 {
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    xSemaphoreGiveFromISR(xBarrierSemaphore, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    if (xBarrierSemaphore) {
+        xSemaphoreGiveFromISR(xBarrierSemaphore, &xHigherPriorityTaskWoken);
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    }
 }
 
-// ===============================================
-// FUNCIONES PARA TEST
-// ===============================================
-static void testSimularCruceMeta(void)
-{
-    // // Debug...
-    // Serial.println("[TEST] Simular cruce de meta");
-
-    // // Acciones...
-    // RaceEvent ev = {
-    //     .type = RaceEventType::EV_RACE_FINISH_REQ,
-    //     .arg = 0
-    // };
-
-    // xQueueSendToBack(raceQ, &ev, portMAX_DELAY);
-}
-
+// ------------------ TEST ------------------------
 static void testSemaphoreSequence(void)
 {
-    // // Obtiene el valor de los pines de salida
-    // Serial.println("Estado de los pines del semáforo:");
-
-    // Serial.print("Rojo: ");
-    // Serial.println(digitalRead(SEMAPHORE_RED_LIGHT));
-
-    // Serial.print("Amarillo: ");
-    // Serial.println(digitalRead(SEMAPHORE_YELLOW_LIGHT));
-
-    // Serial.print("Verde: ");
-    // Serial.println(digitalRead(SEMAPHORE_GREEN_LIGHT));
-}
-
-static void testTempInit(void)
-{
-    // xtestInitRace = xTimerCreate(
-    //     "TestInitRace",
-    //     pdMS_TO_TICKS(2000),
-    //     pdFALSE,
-    //     NULL,
-    //     [](TimerHandle_t xTimer) {
-    //         RaceEvent ev = {
-    //             .type = RaceEventType::EV_RACE_START,
-    //             .arg = 0
-    //         };
-
-    //         xQueueSendToBack(raceQ, &ev, portMAX_DELAY);
-    //         Serial.println("[TEST] Evento de inicio de carrera enviado");
-    //     });
-    // xTimerStart(xtestInitRace, 0);
-
-    // xtestFinishRace = xTimerCreate(
-    //     "TestFinishRace",
-    //     pdMS_TO_TICKS(15000),
-    //     pdFALSE,
-    //     NULL,
-    //     [](TimerHandle_t xTimer) {
-    //         testSimularCruceMeta();
-    //     });
-    // xTimerStart(xtestFinishRace, 0);
-
-    // xtestSemaphore = xTimerCreate(
-    //     "TestSemaphore",
-    //     pdMS_TO_TICKS(1000),
-    //     pdTRUE,
-    //     NULL,
-    //     [](TimerHandle_t xTimer) {
-    //         testSemaphoreSequence();
-    //     });
-    // xTimerStart(xtestSemaphore, 0);
+    // función vacía para debug; se dejó para posibles prints
 }
 
 void testTask(void *pv)
 {
-    // Serial.println("[TEST_TASK] Tarea creada correctamente");
-
-    // QueueHandle_t raceQ = (QueueHandle_t)pv;
-    
-    // for (;;)
-    // {
-    //     if (Serial.available())
-    //     {
-    //         char c = Serial.read();
-    //         RaceEvent evTest;
-
-    //         switch (c)
-    //         {
-    //         case 'i':
-    //             evTest.type = RaceEventType::EV_RACE_START;
-    //             evTest.arg = 0;
-    //             xQueueSendToBack(raceQ, &evTest, portMAX_DELAY);
-
-    //             Serial.println("[TEST] Evento: INICIO DE CARRERA");
-            
-    //             break;
-    //         case 'f': // Cruce de meta
-    //             // evTest.type = RaceEventType::EV_RACE_FINISH_REQ;
-    //             // evTest.arg = 0;
-    //             // xQueueSendToBack(raceQ, &evTest, portMAX_DELAY);
-    //             // digitalWrite(BARRIER_PIN, LOW);
-    //             // vTaskDelay(pdMS_TO_TICKS(50));
-    //             // digitalWrite(BARRIER_PIN, HIGH);
-
-    //             xSemaphoreGive(xBarrierSemaphore);
-
-    //             Serial.println("[TEST] Evento: CRUCE DE META");
-
-    //             break;
-    //         case 'r': // Reset
-    //             evTest.type = RaceEventType::EV_RACE_RESET_REQ;
-    //             evTest.arg = 0;
-    //             xQueueSendToBack(raceQ, &evTest, portMAX_DELAY);
-
-    //             Serial.println("[TEST] Evento: RESET");
-
-    //             break;
-    //         default:
-    //             break;
-    //         }
-    //     }
-
-    //     vTaskDelay(pdMS_TO_TICKS(50));
-    // }
+    // Implementación de test por consola deshabilitada (queda como placeholder)
+    (void)pv;
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
 }

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>CONTROL DE CARRERA</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="stylesheet" type="text/css" href="style.css">
+    </head>
+    <body>
+        <div class="topnav">
+            <h1>SISTEMA DE CONTROL DE CARRERA</h1>
+        </div>
+        <div class="content">
+            <!-- Estado actual del sistema -->
+            <div class="status-section">
+                <div class="status-card">
+                    <p class="status-title">Estado del Sistema</p>
+                    <p class="status-value" id="raceStatus">ESPERANDO</p>
+                </div>
+            </div>
+
+            <!-- Cronómetro (solo visible durante la carrera) -->
+            <div class="timer-section" id="timerSection" style="display: none;">
+                <div class="timer-card">
+                    <p class="timer-title">TIEMPO TRANSCURRIDO</p>
+                    <p class="timer-display" id="raceTimer">00:00.000</p>
+                </div>
+            </div>
+
+            <!-- Botones de control -->
+            <div class="controls-section">
+                <button class="control-btn start-btn" id="startBtn" onclick="startRace()">
+                    INICIAR CARRERA
+                </button>
+                <button class="control-btn reset-btn" id="resetBtn" onclick="resetRace()">
+                    REINICIAR SISTEMA
+                </button>
+            </div>
+
+
+            <!-- Información adicional -->
+            <div class="info-section">
+                <div class="info-card">
+                    <p class="info-title">Conexion WebSocket</p>
+                    <p class="info-value" id="connectionStatus">Desconectado</p>
+                </div>
+            </div>
+        </div>
+        <script src="script.js"></script>
+    </body>
+</html>
